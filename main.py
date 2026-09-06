@@ -1,4 +1,3 @@
-
 """
 NSE + BSE Corporate Announcements -> Telegram Channel bot.
 

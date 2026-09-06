@@ -64,6 +64,9 @@ def _fetch_feed(url):
         return []
 
 
+MAX_SNIPPET_CHARS = 220  # keep each snippet to a short teaser, not full text
+
+
 def _entries_to_items(entries, source_label, category):
     items = []
     for e in entries:
@@ -71,12 +74,19 @@ def _entries_to_items(entries, source_label, category):
         title = _clean(e.get("title", ""))
         if not title or not link:
             continue
+        snippet = _clean(e.get("summary", "") or e.get("description", ""))
+        # Google News RSS often repeats the title inside the summary — drop it if so
+        if snippet and snippet.lower().startswith(title.lower()[:30]):
+            snippet = ""
+        if len(snippet) > MAX_SNIPPET_CHARS:
+            snippet = snippet[:MAX_SNIPPET_CHARS].rsplit(" ", 1)[0] + "…"
         item_id = f"news-{category}-{link}"
         items.append({
             "id": item_id,
             "category": category,
             "source": source_label,
             "title": title,
+            "snippet": snippet,
             "link": link,
         })
     return items
@@ -131,7 +141,11 @@ def build_digest_message(category, items):
     header = CATEGORY_LABELS.get(category, category)
     lines = [f"<b>{header}</b>"]
     for item in items[:MAX_ITEMS_PER_CATEGORY]:
-        lines.append(f"• <b>[{item['source']}]</b> {item['title']}\n{item['link']}")
+        entry = f"• <b>[{item['source']}]</b> {item['title']}"
+        if item.get("snippet"):
+            entry += f"\n{item['snippet']}"
+        entry += f"\n{item['link']}"
+        lines.append(entry)
     return "\n\n".join(lines)
 
 

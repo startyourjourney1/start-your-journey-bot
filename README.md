@@ -47,12 +47,14 @@ Two ways:
 
 Two independent jobs run on a schedule (APScheduler):
 
-- **Exchange filings** (`poll_and_post`, every `POLL_INTERVAL_MIN`, default 5 min) — polls NSE's `corporate-announcements` endpoint and BSE's `AnnGetData` endpoint, posts **one message per new filing** since these are low-volume and time-sensitive.
+- **Exchange filings** (`poll_and_post`, every `POLL_INTERVAL_MIN`, default 5 min) — polls NSE's `corporate-announcements` endpoint and BSE's `AnnGetData` endpoint, posts **one message per new filing** since these are low-volume and time-sensitive. When a filing links to a PDF circular, the bot downloads it and extracts the actual text into the message (instead of just a link) — the original link is still included underneath for reference. If a circular is a scanned image rather than real text (common for older-style filings), extraction isn't possible and the message falls back to just the link.
 - **General news digest** (`poll_and_post_news`, every `NEWS_INTERVAL_MIN`, default 20 min) — pulls from `news_feeds.py` and posts **one batched digest message per category** (so a busy news hour doesn't flood the channel with 40 separate messages):
   - 🏢 **Company & market news** — direct RSS from Moneycontrol, Economic Times, Business Line, Financial Express.
   - 🌍 **Geopolitics & Trump news** — via Google News RSS search, including a `site:reuters.com` query (Reuters retired its own public RSS feeds years ago, so this is the standard reliable workaround news aggregators use).
   - 📊 **Brokerage calls** — Google News RSS query for "target price / upgrade / downgrade" mentions tied to NSE/BSE stocks.
   - 💳 **Credit rating actions** — Google News RSS query for CRISIL / ICRA / CARE Ratings / India Ratings rating actions.
+
+  Each item shows the headline plus a short 1–2 sentence snippet (the preview text publishers include in their RSS feed for exactly this purpose), so you get the gist without needing to click through. Full article text is never reproduced — that would be a copyright problem at the scale of an automated 24/7 bot, unlike the NSE/BSE circulars (which are factual regulatory disclosures, not journalism).
 
 Both jobs track what's already been posted in `seen_ids.json` / `seen_news_ids.json` so nothing repeats.
 
