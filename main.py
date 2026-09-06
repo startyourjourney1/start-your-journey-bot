@@ -197,14 +197,17 @@ def fetch_bse_announcements():
 MAX_EXTRACTED_CHARS = 3200  # keep well under Telegram's 4096-char message limit
 
 
-def extract_pdf_text(url):
+def extract_pdf_text(url, session=None):
     """Downloads a circular PDF and pulls its text out. Returns None if the
     PDF is a scanned image (no extractable text) or the download fails —
-    the caller should fall back to just linking the PDF in that case."""
+    the caller should fall back to just linking the PDF in that case.
+    Pass a warmed-up session for NSE links — NSE blocks plain requests
+    without the cookies obtained by first visiting nseindia.com."""
     if not url or not url.startswith("http"):
         return None
     try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=20)
+        requester = session if session is not None else requests
+        resp = requester.get(url, headers=BROWSER_HEADERS, timeout=20)
         resp.raise_for_status()
     except Exception as e:
         log.error("PDF download failed for %s: %s", url, e)
@@ -223,6 +226,7 @@ def extract_pdf_text(url):
                     break
         text = " ".join(" ".join(text_parts).split())  # collapse whitespace
         if not text:
+            log.info("PDF at %s produced no extractable text (likely a scanned image).", url)
             return None  # likely a scanned/image-only PDF
         if len(text) > MAX_EXTRACTED_CHARS:
             text = text[:MAX_EXTRACTED_CHARS].rsplit(" ", 1)[0] + "…"
@@ -278,13 +282,15 @@ def poll_and_post():
         return
 
     log.info("Posting %d new announcement(s).", len(new_items))
+    nse_session = get_nse_session()  # reused for downloading NSE PDF attachments below
     for item in new_items:
         # normalize BSE's relative attachment path into a full URL
         if item["source"] == "BSE" and item.get("link") and not item["link"].startswith("http"):
             item["link"] = f"https://www.bseindia.com/xml-data/corpfiling/AttachHis/{item['link']}"
 
         if item.get("link"):
-            item["extracted_text"] = extract_pdf_text(item["link"])
+            session = nse_session if item["source"] == "NSE" else None
+            item["extracted_text"] = extract_pdf_text(item["link"], session=session)
 
         send_telegram_message(format_message(item))
         time.sleep(1.5)  # stay comfortably under Telegram's rate limits
