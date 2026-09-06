@@ -4,10 +4,9 @@ credit rating actions — pulled from RSS feeds and Google News RSS search
 (used as a reliable proxy for outlets like Reuters that no longer run
 public RSS feeds of their own).
 
-Unlike the NSE/BSE module (one alert per filing), this module batches
-everything found in a poll cycle into a single digest message per
-category, so the channel doesn't get flooded — general news feeds
-produce far more items per hour than exchange filings do.
+Each item is posted as its own separate message (not batched), same as
+NSE/BSE filings — so a busy poll cycle still means several individual
+messages, just no digest-style grouping.
 """
 
 import re
@@ -43,7 +42,8 @@ CREDIT_RATING_QUERIES = [
     ("Credit Ratings", '(CRISIL OR ICRA OR "CARE Ratings" OR "India Ratings") rating (upgrade OR downgrade OR outlook)'),
 ]
 
-MAX_ITEMS_PER_CATEGORY = 10  # cap digest size per category per cycle
+MAX_ITEMS_PER_CATEGORY = 10  # safety cap: max individual messages sent per category per cycle;
+                              # any beyond this roll into the next cycle rather than flooding the channel
 
 TAG_RE = re.compile(r"<[^>]+>")
 
@@ -127,26 +127,31 @@ def fetch_credit_rating_news():
     return all_items
 
 
-CATEGORY_LABELS = {
-    "company_news": "🏢 Company & Market News",
-    "geopolitics": "🌍 Geopolitics",
-    "brokerage": "📊 Brokerage Calls",
-    "credit_ratings": "💳 Credit Rating Actions",
+CATEGORY_EMOJI = {
+    "company_news": "🏢",
+    "geopolitics": "🌍",
+    "brokerage": "📊",
+    "credit_ratings": "💳",
 }
 
 
-def build_digest_message(category, items):
-    """Combine several items from the same category into one message
-    so a busy news cycle doesn't spam the channel with dozens of posts."""
-    header = CATEGORY_LABELS.get(category, category)
-    lines = [f"<b>{header}</b>"]
-    for item in items[:MAX_ITEMS_PER_CATEGORY]:
-        entry = f"• <b>[{item['source']}]</b> {item['title']}"
-        if item.get("snippet"):
-            entry += f"\n{item['snippet']}"
-        entry += f"\n{item['link']}"
-        lines.append(entry)
-    return "\n\n".join(lines)
+def _escape_url_for_html(url):
+    """Telegram's HTML parse mode needs & and " escaped inside href
+    attributes, or links with query strings can break/get cut off."""
+    return url.replace("&", "&amp;").replace('"', "&quot;")
+
+
+def format_news_item(item):
+    """Clean, single-item message: no digest grouping, no header line.
+    The link is a short clickable word, not the full raw URL, so it
+    stays one line instead of showing a long address."""
+    emoji = CATEGORY_EMOJI.get(item["category"], "📰")
+    lines = [f"{emoji} <b>{item['title']}</b> — {item['source']}"]
+    if item.get("snippet"):
+        lines.append(item["snippet"])
+    safe_url = _escape_url_for_html(item["link"])
+    lines.append(f'🔗 <a href="{safe_url}">Read more</a>')
+    return "\n".join(lines)
 
 
 def fetch_all_news():

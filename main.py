@@ -16,6 +16,7 @@ Environment variables (see .env.example):
 
 import os
 import io
+import re
 import json
 import time
 import logging
@@ -207,15 +208,54 @@ def fetch_bse_announcements():
     return items
 
 
-MAX_EXTRACTED_CHARS = 3200  # keep well under Telegram's 4096-char message limit
+MAX_RAW_SCAN_CHARS = 4000    # how much raw PDF text we read internally, to search for a subject line
+MAX_SUMMARY_CHARS = 320      # length of the final human-readable summary posted to the channel
+
+# Many NSE/BSE circulars follow a standard letter format with a "Sub:" or
+# "Subject:" line stating exactly what the filing is about — e.g.
+# "Sub: Submission of newspaper advertisement ... 29th AGM". Pulling that
+# one line out gives a far more readable result than dumping the whole
+# letter, and it's the same technique a person skimming the PDF would use.
+SUBJECT_RE = re.compile(
+    r"\bsub(?:ject)?\s*[:\-]\s*(.+?)\s*"
+    r"(?:dear\s+sir|dear\s+madam|dear\s+sirs?\s*/\s*madam|yours\s+faithfully|thanking\s+you|$)",
+    re.IGNORECASE,
+)
+
+# Strips characters outside printable ASCII — this cleans up the garbled
+# box/replacement characters that show up when a PDF embeds a non-Latin
+# script (e.g. Punjabi, Hindi) in a font pdfplumber can't decode properly.
+# Downside: any legitimate non-English portions of a circular get dropped
+# from the summary rather than shown garbled.
+NON_ASCII_RE = re.compile(r"[^\x20-\x7E]+")
+
+
+def summarize_circular_text(raw_text):
+    """Turns raw extracted PDF text into a short, readable summary —
+    prefers the letter's own "Sub:" line, falls back to a clean truncation."""
+    if not raw_text:
+        return None
+    cleaned = NON_ASCII_RE.sub(" ", raw_text)
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return None  # nothing readable survived cleaning (e.g. all non-Latin script)
+
+    match = SUBJECT_RE.search(cleaned)
+    summary = match.group(1).strip(" .") if match else cleaned
+
+    if len(summary) > MAX_SUMMARY_CHARS:
+        cut = summary[:MAX_SUMMARY_CHARS]
+        last_space = cut.rfind(" ")
+        summary = (cut[:last_space] if last_space > 100 else cut) + "…"
+    return summary
 
 
 def extract_pdf_text(url, session=None):
-    """Downloads a circular PDF and pulls its text out. Returns None if the
-    PDF is a scanned image (no extractable text) or the download fails —
-    the caller should fall back to just linking the PDF in that case.
-    Pass a warmed-up session for NSE links — NSE blocks plain requests
-    without the cookies obtained by first visiting nseindia.com."""
+    """Downloads a circular PDF and returns a short readable summary of it.
+    Returns None if the PDF is a scanned image (no extractable text) or the
+    download fails — the caller should fall back to just linking the PDF
+    in that case. Pass a warmed-up session for NSE links — NSE blocks plain
+    requests without the cookies obtained by first visiting nseindia.com."""
     if not url or not url.startswith("http"):
         return None
     try:
@@ -235,15 +275,13 @@ def extract_pdf_text(url, session=None):
                 if page_text:
                     text_parts.append(page_text)
                     total_len += len(page_text)
-                if total_len >= MAX_EXTRACTED_CHARS:
+                if total_len >= MAX_RAW_SCAN_CHARS:
                     break
-        text = " ".join(" ".join(text_parts).split())  # collapse whitespace
-        if not text:
+        raw_text = " ".join(" ".join(text_parts).split())  # collapse whitespace
+        if not raw_text:
             log.info("PDF at %s produced no extractable text (likely a scanned image).", url)
             return None  # likely a scanned/image-only PDF
-        if len(text) > MAX_EXTRACTED_CHARS:
-            text = text[:MAX_EXTRACTED_CHARS].rsplit(" ", 1)[0] + "…"
-        return text
+        return summarize_circular_text(raw_text)
     except Exception as e:
         log.error("PDF text extraction failed for %s: %s", url, e)
         return None
@@ -251,24 +289,21 @@ def extract_pdf_text(url, session=None):
 
 # ---------- formatting ----------
 
+def escape_url_for_html(url):
+    """Telegram's HTML parse mode needs & and " escaped inside href
+    attributes, or links with query strings can break/get cut off."""
+    return url.replace("&", "&amp;").replace('"', "&quot;")
+
+
 def format_message(item):
-    lines = [
-        f"📢 <b>{item['source']} Announcement</b>",
-        f"<b>{item['company']}</b>",
-        item["subject"],
-    ]
-    if item.get("time"):
-        lines.append(f"🕒 {item['time']}")
-
-    if item.get("extracted_text"):
-        lines.append("")
-        lines.append(item["extracted_text"])
-        if item.get("link"):
-            lines.append("")
-            lines.append(f"🔗 Full circular: {item['link']}")
-    elif item.get("link"):
-        lines.append(item["link"])
-
+    """Clean, no-boilerplate style: just the company, what happened, and
+    a link — no repeated header line, no timestamp. The link is shown as
+    a short clickable word, not the full raw URL, so it stays one line."""
+    body = item.get("extracted_text") or item["subject"]
+    lines = [f"📌 <b>{item['company']}</b> — {item['source']}", body]
+    if item.get("link"):
+        safe_url = escape_url_for_html(item["link"])
+        lines.append(f'🔗 <a href="{safe_url}">View Circular</a>')
     return "\n".join(lines)
 
 
@@ -336,16 +371,27 @@ def poll_and_post_news():
         save_seen(seen, SEEN_NEWS_FILE)
         return
 
+    total_posted = 0
     for category, items in all_news.items():
         new_items = [it for it in items if it["id"] not in seen]
         if not new_items:
             continue
-        for it in new_items:
+        # cap how many go out this cycle so a sudden burst doesn't flood
+        # the channel — anything beyond the cap simply rolls into the
+        # next cycle instead of being sent (it stays "unseen" until then)
+        to_send = new_items[:news_feeds.MAX_ITEMS_PER_CATEGORY]
+        for it in to_send:
             seen.add(it["id"])
-        message = news_feeds.build_digest_message(category, new_items)
-        send_telegram_message(message)
-        time.sleep(1.5)
-        log.info("Posted %d new item(s) in category '%s'.", len(new_items), category)
+            send_telegram_message(news_feeds.format_news_item(it))
+            time.sleep(1.5)
+            total_posted += 1
+        if len(new_items) > len(to_send):
+            log.info(
+                "Category '%s' had %d extra new item(s) beyond this cycle's cap; they'll go out next cycle.",
+                category, len(new_items) - len(to_send),
+            )
+
+    log.info("Posted %d new news item(s) this cycle.", total_posted)
 
     save_seen(seen, SEEN_NEWS_FILE)
 
