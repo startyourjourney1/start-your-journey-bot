@@ -56,7 +56,7 @@ Two independent jobs run on a schedule (APScheduler):
 
   Each item shows the headline plus a short 1–2 sentence snippet (the preview text publishers include in their RSS feed for exactly this purpose), so you get the gist without needing to click through. Full article text is never reproduced — that would be a copyright problem at the scale of an automated 24/7 bot, unlike the NSE/BSE circulars (which are factual regulatory disclosures, not journalism).
 
-Both jobs track what's already been posted in `seen_ids.json` / `seen_news_ids.json` so nothing repeats.
+Both jobs track what's already been posted in `seen_ids.json` / `seen_news_ids.json` so nothing repeats. **Note:** Railway's free tier doesn't keep local files between redeploys, so every time you push a code update, the bot treats its first run afterward as a fresh start — it silently "catches up" on whatever already exists that day without posting it, then alerts normally on anything genuinely new from that point on. In other words: redeploying won't flood your channel, but announcements that happened in the gap between the old and new deployment (usually well under a minute) may be silently skipped. If this ever matters to you, Railway supports attaching a persistent Volume to keep these files across deploys — ask me if you want that set up.
 
 ### Editing the feed list
 

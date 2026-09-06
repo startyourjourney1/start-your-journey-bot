@@ -94,7 +94,7 @@ def save_offset(offset):
 
 # ---------- Telegram ----------
 
-def send_message_to_chat(chat_id, text):
+def send_message_to_chat(chat_id, text, _retry=True):
     if not TELEGRAM_BOT_TOKEN:
         log.error("Missing TELEGRAM_BOT_TOKEN env var.")
         return
@@ -107,7 +107,12 @@ def send_message_to_chat(chat_id, text):
     }
     try:
         resp = requests.post(url, json=payload, timeout=15)
-        if resp.status_code != 200:
+        if resp.status_code == 429 and _retry:
+            retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+            log.warning("Rate limited by Telegram, waiting %ss before retrying.", retry_after)
+            time.sleep(retry_after + 1)
+            send_message_to_chat(chat_id, text, _retry=False)
+        elif resp.status_code != 200:
             log.error("Telegram send failed: %s %s", resp.status_code, resp.text)
     except Exception as e:
         log.error("Telegram send error: %s", e)
@@ -171,12 +176,20 @@ def fetch_bse_announcements():
         "strToDate": today,
         "strType": "C",
     }
+    headers = dict(BROWSER_HEADERS)
+    headers["Referer"] = "https://www.bseindia.com/corporates/ann.html"
+    headers["Origin"] = "https://www.bseindia.com"
     try:
-        resp = requests.get(BSE_ANNOUNCEMENTS_URL, params=params, headers=BROWSER_HEADERS, timeout=15)
+        resp = requests.get(BSE_ANNOUNCEMENTS_URL, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        log.error("BSE fetch failed: %s", e)
+        snippet = ""
+        try:
+            snippet = resp.text[:200]
+        except Exception:
+            pass
+        log.error("BSE fetch failed: %s (response started with: %r)", e, snippet)
         return []
 
     items = []
@@ -263,6 +276,7 @@ def format_message(item):
 
 def poll_and_post():
     log.info("Polling NSE + BSE for new announcements...")
+    is_first_run = not os.path.exists(SEEN_FILE)
     seen = load_seen()
     new_items = []
 
@@ -276,6 +290,15 @@ def poll_and_post():
             if item["id"] not in seen:
                 new_items.append(item)
                 seen.add(item["id"])
+
+    if is_first_run:
+        # Railway wipes local files on every redeploy, so on a fresh start
+        # everything looks "new." Rather than blast the whole day's backlog
+        # (and get rate-limited), silently baseline it and only alert on
+        # genuinely new announcements from here on.
+        log.info("First run detected — baselining %d existing announcement(s) silently.", len(new_items))
+        save_seen(seen)
+        return
 
     if not new_items:
         log.info("No new announcements.")
@@ -300,9 +323,18 @@ def poll_and_post():
 
 def poll_and_post_news():
     log.info("Polling company news, geopolitics, brokerage & credit rating feeds...")
+    is_first_run = not os.path.exists(SEEN_NEWS_FILE)
     seen = load_seen(SEEN_NEWS_FILE)
 
     all_news = news_feeds.fetch_all_news()
+
+    if is_first_run:
+        for items in all_news.values():
+            for it in items:
+                seen.add(it["id"])
+        log.info("First run detected — baselining existing news items silently.")
+        save_seen(seen, SEEN_NEWS_FILE)
+        return
 
     for category, items in all_news.items():
         new_items = [it for it in items if it["id"] not in seen]
