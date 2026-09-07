@@ -230,15 +230,66 @@ SUBJECT_RE = re.compile(
 NON_ASCII_RE = re.compile(r"[^\x20-\x7E]+")
 
 
+# Handles the common "newspaper advertisement for AGM" circular format —
+# extracts the AGM date and the list of newspapers so the note reads like
+# a proper structured summary instead of the raw "Sub:" sentence. Other
+# circular types (results, board meetings, buybacks, etc.) don't follow
+# this wording and fall back to the plain Sub: line below.
+DATE_PART = (
+    r"(?:(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday),?\s*)?"
+    r"(?:\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+|[A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?),?\s*\d{4}"
+)
+AGM_RE = re.compile(
+    r"(\d+(?:st|nd|rd|th))\s+Annual General Meeting.*?(?:scheduled on|to be held on|held on|on)\s+(" + DATE_PART + ")",
+    re.IGNORECASE,
+)
+NEWSPAPER_LIST_RE = re.compile(
+    r"published in\s+(.+?)\s+on\s+" + DATE_PART,
+    re.IGNORECASE,
+)
+
+
+def build_agm_newspaper_note(cleaned):
+    """Returns a structured note for AGM-newspaper-advertisement circulars,
+    or None if this circular doesn't match that pattern."""
+    low = cleaned.lower()
+    if "annual general meeting" not in low or "newspaper" not in low:
+        return None
+    match = AGM_RE.search(cleaned)
+    if not match:
+        return None
+    ordinal, date = match.group(1), match.group(2)
+
+    newspapers = []
+    news_match = NEWSPAPER_LIST_RE.search(cleaned)
+    if news_match:
+        parts = re.split(r",\s*and\s+|\s+and\s+|,\s+", news_match.group(1))
+        newspapers = [p.strip() for p in parts if p.strip()]
+
+    lines = [
+        f"- Company has published the advertisement of {ordinal} Annual General "
+        f"Meeting to be held on {date} for equity shareholders of the company "
+        f"in following Newspapers:"
+    ]
+    for i, name in enumerate(newspapers, 1):
+        lines.append(f"{i}. {name}")
+    return "\n".join(lines)
+
+
 def summarize_circular_text(raw_text):
-    """Turns raw extracted PDF text into a short, readable summary —
-    prefers the letter's own "Sub:" line, falls back to a clean truncation."""
+    """Turns raw extracted PDF text into a short, readable summary — tries
+    the AGM-newspaper-ad template first, then the letter's own "Sub:" line,
+    then falls back to a clean truncation."""
     if not raw_text:
         return None
     cleaned = NON_ASCII_RE.sub(" ", raw_text)
     cleaned = " ".join(cleaned.split())
     if not cleaned:
         return None  # nothing readable survived cleaning (e.g. all non-Latin script)
+
+    agm_note = build_agm_newspaper_note(cleaned)
+    if agm_note:
+        return agm_note
 
     match = SUBJECT_RE.search(cleaned)
     summary = match.group(1).strip(" .") if match else cleaned
